@@ -58,6 +58,39 @@ function findMatchingAirQuality(forecast: AirQualityForecast, time: number, span
     return null;
 }
 
+function applyAirQuality(forecast: ForecastData, airQuality: AirQualityForecast): void {
+  if (!forecast?.currently || !forecast.hourly || !forecast.daily?.data)
+    return;
+
+  const current = findMatchingAirQuality(airQuality, Date.now() / 1000 - 3600, 0);
+
+  if (current) {
+    forecast.currently.aqiEu = current.aqiEu;
+    forecast.currently.aqiUs = current.aqiUs;
+    forecast.currently.aqComps = current.aqComps;
+  }
+
+  for (const hour of forecast.hourly) {
+    const aqs = findMatchingAirQuality(airQuality, hour.time, 3600);
+
+    if (aqs) {
+      hour.aqiEu = aqs.aqiEu;
+      hour.aqiUs = aqs.aqiUs;
+      hour.aqComps = aqs.aqComps;
+    }
+  }
+
+  for (const day of forecast.daily.data) {
+    const aqs = findMatchingAirQuality(airQuality, day.time, 86400);
+
+    if (aqs) {
+      day.aqiEu = aqs.aqiEu;
+      day.aqiUs = aqs.aqiUs;
+      day.aqComps = aqs.aqComps;
+    }
+  }
+}
+
 const log = toBoolean(process.env.AWC_LOG_CACHE_ACTIVITY);
 
 router.get('/', async (req: Request, res: Response) => {
@@ -99,40 +132,16 @@ router.get('/', async (req: Request, res: Response) => {
   let usedIndex: number;
   let forecast = forecasts[usedIndex =
     ({ vc: visualCrossingIndex, vi: visualCrossingIndex, wb: weatherBitIndex, we: weatherBitIndex } as any)[pref] ?? 0] as ForecastData;
-  const vcForecast = !(forecasts[visualCrossingIndex] instanceof Error) && forecasts[visualCrossingIndex] as ForecastData;
+  const vcForecast = visualCrossingIndex > 0 && !(forecasts[visualCrossingIndex] instanceof Error) &&
+    forecasts[visualCrossingIndex] as ForecastData;
 
-  for (let replaceIndex = 0; replaceIndex < forecasts.length && (!forecast || forecastBad(forecast)); ++replaceIndex)
+  // Air-quality data is not a weather forecast. Skipping it here keeps a failed
+  // Weather Underground result eligible for the proxy fallback below.
+  for (let replaceIndex = 0; replaceIndex < forecasts.length && (!forecast || forecastBad(forecast)); ++replaceIndex) {
+    if (replaceIndex === airQualityIndex)
+      continue;
+
     forecast = forecasts[usedIndex = replaceIndex] as ForecastData;
-
-  if (airQualityIndex && !(forecasts[airQualityIndex] instanceof Error)) {
-    const airQuality = forecasts[airQualityIndex] as AirQualityForecast;
-    const aqs = findMatchingAirQuality(airQuality, Date.now() / 1000 - 3600, 0);
-
-    if (aqs) {
-      forecast.currently.aqiEu = aqs.aqiEu;
-      forecast.currently.aqiUs = aqs.aqiUs;
-      forecast.currently.aqComps = aqs.aqComps;
-    }
-
-    for (const hour of forecast.hourly) {
-      const aqs = findMatchingAirQuality(airQuality, hour.time, 3600);
-
-      if (aqs) {
-        hour.aqiEu = aqs.aqiEu;
-        hour.aqiUs = aqs.aqiUs;
-        hour.aqComps = aqs.aqComps;
-      }
-    }
-
-    for (const day of forecast.daily.data) {
-      const aqs = findMatchingAirQuality(airQuality, day.time, 86400);
-
-      if (aqs) {
-        day.aqiEu = aqs.aqiEu;
-        day.aqiUs = aqs.aqiUs;
-        day.aqComps = aqs.aqComps;
-      }
-    }
   }
 
   console.log(timeStamp(), sources, usedIndex, forecasts.map(f => forecastResultCode(f)).join(''));
@@ -158,6 +167,9 @@ router.get('/', async (req: Request, res: Response) => {
       forecast = e;
     }
   }
+
+  if (airQualityIndex && !(forecasts[airQualityIndex] instanceof Error) && !(forecast instanceof Error))
+    applyAirQuality(forecast, forecasts[airQualityIndex] as AirQualityForecast);
 
   if (forecast instanceof Error)
     res.status(500).send(forecast.message);
